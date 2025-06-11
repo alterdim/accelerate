@@ -1709,6 +1709,12 @@ class FullyShardedDataParallelPlugin:
             "help": "The shard rotation strategy to use, only used when context parallel is enabled and `fsdp_version` is set to 2. Defaults to `allgather` if `fsdp_version` is set to 2."
         },
     )
+    device_mesh: Optional[torch.distributed.DeviceMesh] = field(
+        default=None,
+        metadata={
+            "help": "The device mesh to use. Only applicable when `fsdp_version` is set to 2."
+        },
+    )
 
     def __post_init__(self):
         from torch.distributed.fsdp import (

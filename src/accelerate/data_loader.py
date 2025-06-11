@@ -1132,8 +1132,8 @@ def prepare_data_loader(
                 submesh_tp_size = torch_device_mesh["tp"].size()
             if "dp" in torch_device_mesh.mesh_dim_names:
                 submesh_dp_size = torch_device_mesh["dp"].size()
-            if "fsdp" in torch_device_mesh.mesh_dim_names:
-                submesh_fsdp_size = torch_device_mesh["fsdp"].size()
+            if "dp_shard" in torch_device_mesh.mesh_dim_names:
+                submesh_fsdp_size = torch_device_mesh["dp_shard"].size()
             process_index = process_index // submesh_tp_size
             num_processes = submesh_fsdp_size * submesh_dp_size
 
