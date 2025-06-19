@@ -17,33 +17,53 @@ Example of training with Context Parallel using FSDP2 via Accelerate.
 This example demonstrates how to use Accelerate's context_parallel feature for efficient long sequence training.
 """
 
+import argparse
+import contextlib
+
 import torch
+import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM
 
 from accelerate import Accelerator
-from accelerate.utils import FullyShardedDataParallelPlugin, set_seed, TorchTensorParallelPlugin
+from accelerate.utils import FullyShardedDataParallelPlugin, set_seed
 from utils import PerformanceTracker, create_collate_fn, get_dataset, setup_tokenizer
 
 
 MODEL_ID = "NousResearch/Hermes-3-Llama-3.1-8B"
 
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--apply-tp", action="store_true")
+    parser.add_argument("--profile", action="store_true")
+    return parser.parse_args()
+
+
 def main():
     """
     Main function to train the model.
     """
+    args = parse_args()
+
     set_seed(42)
 
-    device_mesh = init_device_mesh(mesh_dim_names=("dp_shard", "tp"), mesh_shape=(4, 2), device_type="cuda")
+    plugin_kwargs = {}
+    model_kwargs = {}
+
+    if args.apply_tp:
+        device_mesh = init_device_mesh(mesh_dim_names=("dp_shard", "tp"), mesh_shape=(4, 2), device_type="cuda")
+        plugin_kwargs["device_mesh"] = device_mesh
+        model_kwargs["device_mesh"] = device_mesh
+        model_kwargs["tp_plan"] = "auto"
 
     fsdp2_plugin = FullyShardedDataParallelPlugin(
         fsdp_version=2,
         cpu_ram_efficient_loading=False,
         auto_wrap_policy="transformer_based_wrap",
         transformer_cls_names_to_wrap=["LlamaDecoderLayer"],
-        device_mesh=device_mesh,
+        **plugin_kwargs,
     )
     fsdp2_plugin.set_mixed_precision("bf16")
 
@@ -55,8 +75,7 @@ def main():
         MODEL_ID,
         torch_dtype=torch.bfloat16,
         use_cache=False,
-        tp_plan="auto",
-        device_mesh=device_mesh,
+        **model_kwargs,
     )
 
     tokenizer = setup_tokenizer(MODEL_ID)
@@ -73,32 +92,52 @@ def main():
     total_num_steps = min(1000, len(dataloader))
     performance_tracker = PerformanceTracker(warmup_steps=10)
 
-    for step, batch in enumerate(dataloader):
-        if step >= total_num_steps:
-            break
+    if args.profile:
+        prof = torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+        )
+    else:
+        prof = contextlib.nullcontext()
 
-        outputs = model(**batch)
-        loss = outputs.loss
+    with prof:
+        for step, batch in enumerate(dataloader):
+            if step >= total_num_steps:
+                break
 
-        accelerator.backward(loss)
-        optimizer.step()
-        optimizer.zero_grad()
+            outputs = model(**batch)
+            loss = outputs.loss
 
-        batch_tokens = batch["input_ids"].shape[1]
-        metrics = performance_tracker.step(batch_tokens)
+            accelerator.backward(loss)
+            optimizer.step()
+            optimizer.zero_grad()
 
-        print_msg = f"Step {step}/{total_num_steps}, Loss: {loss.item():.4f}"
-        log_metrics = {"loss": loss.item()}
+            if args.profile:
+                break
 
-        if "warmup_completed" in metrics:
-            accelerator.print("Warm up completed! Starting performance tracking...")
-        elif metrics:
-            print_msg += f" | Average steps/s: {metrics['steps_per_second']:.2f}"
+            dist.all_reduce(loss, op=dist.ReduceOp.AVG)
 
-        if step % 10 == 0 or step == total_num_steps - 1:
-            accelerator.print(print_msg)
+            batch_tokens = batch["input_ids"].shape[1]
+            metrics = performance_tracker.step(batch_tokens)
 
-        accelerator.log(log_metrics)
+            print_msg = f"Step {step}/{total_num_steps}, Loss: {loss.item():.4f}"
+            log_metrics = {"loss": loss.item()}
+
+            if "warmup_completed" in metrics:
+                accelerator.print("Warm up completed! Starting performance tracking...")
+            elif metrics:
+                print_msg += f" | Average steps/s: {metrics['steps_per_second']:.2f}"
+
+            if step % 10 == 0 or step == total_num_steps - 1:
+                accelerator.print(print_msg)
+
+            accelerator.log(log_metrics)
+
+    if args.profile and accelerator.is_main_process:
+        trace_name = f"trace_{'tp' if args.apply_tp else 'no_tp'}.json"
+        prof.export_chrome_trace(trace_name)
 
     accelerator.wait_for_everyone()
     accelerator.end_training()
