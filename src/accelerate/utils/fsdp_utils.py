@@ -496,11 +496,14 @@ def fsdp2_load_full_state_dict(accelerator, model: torch.nn.Module, full_sd: dic
             tensor = tensor.contiguous()
         return tensor
 
+    if os.environ["RANK"] == "2":
+        pass
+
     if accelerator.is_main_process:
         for (param_name, full_param), sharded_param in zip(full_sd.items(), meta_sharded_sd.values()):
             full_param = full_param.detach().cuda()
             mesh = sharded_param.device_mesh
-            dist.broadcast(full_param, src=0, group=mesh.get_group())
+            dist.broadcast(full_param, src=0, group=mesh["dp_shard_cp"].get_group())
             sharded_tensor = distribute_tensor(full_param, mesh, sharded_param.placements)
             to_contiguous, casting_dtype = _infer_parameter_dtype(
                 model,
@@ -514,7 +517,7 @@ def fsdp2_load_full_state_dict(accelerator, model: torch.nn.Module, full_sd: dic
         for param_name, sharded_param in meta_sharded_sd.items():
             full_tensor = torch.empty(sharded_param.size(), device="cuda", dtype=sharded_param.dtype)
             mesh = sharded_param.device_mesh
-            dist.broadcast(full_tensor, src=0, group=mesh.get_group())
+            dist.broadcast(full_tensor, src=0, group=mesh["dp_shard_cp"].get_group())
             sharded_tensor = distribute_tensor(full_tensor, mesh, sharded_param.placements)
             to_contiguous, casting_dtype = _infer_parameter_dtype(
                 model,
@@ -546,9 +549,7 @@ def fsdp2_switch_optimizer_parameters(optimizer: torch.optim.Optimizer, mapping:
     """
     try:
         for param_group in optimizer.param_groups:
-            param_group["params"] = [
-                mapping[p.data_ptr] for p in param_group["params"]
-            ]
+            param_group["params"] = [mapping[p.data_ptr] for p in param_group["params"]]
     except KeyError:
         # This shouldn't ever happen, but we want to fail here else training wouldn't be numerically correct
         # This basically means that we're missing a mapping from the original parameter to the sharded parameter
@@ -611,6 +612,8 @@ def fsdp2_prepare_model(accelerator, model: torch.nn.Module, fully_shard_kwargs:
         return model
 
     fully_shard_kwargs = fully_shard_kwargs or {}
+    if fully_shard_kwargs.get("mesh", None) is not None:
+        fully_shard_kwargs["mesh"] = fully_shard_kwargs["mesh"]["dp_shard_cp"]
 
     fsdp2_plugin = accelerator.state.fsdp_plugin
 

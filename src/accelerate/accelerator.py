@@ -1561,15 +1561,16 @@ class Accelerator:
         # Flatten the mesh if needed
         if (device_mesh := _fully_shard_kwargs.get("mesh", None)) is not None:
             dp_shard_cp_dims = []
+            other_dims = []
             for n in ["dp_shard", "cp"]:
                 if n in device_mesh.mesh_dim_names:
                     dp_shard_cp_dims.append(n)
+                else:
+                    other_dims.append(n)
 
             device_mesh[dp_shard_cp_dims]._flatten("dp_shard_cp")
 
-            _fully_shard_kwargs["mesh"] = device_mesh[
-                "dp_shard_cp"
-            ]  # apply fully_shard to a joint mesh of cp and dp_shard
+            _fully_shard_kwargs["mesh"] = device_mesh
 
         self._fsdp_device_mesh = _fully_shard_kwargs["mesh"]
 
@@ -2415,8 +2416,8 @@ class Accelerator:
             return self.state.torch_tp_plugin.torch_device_mesh
         elif self.distributed_type == DistributedType.DEEPSPEED and hasattr(self.state, "ds_device_mesh"):
             return self.state.ds_device_mesh
-        elif hasattr(self.state, "_fsdp_device_mesh"):
-            return self.state._fsdp_device_mesh
+        elif hasattr(self, "_fsdp_device_mesh"):
+            return self._fsdp_device_mesh
         return None
 
     def _prepare_msamp(self, *args, device_placement):
