@@ -66,7 +66,7 @@ def main():
     if args.apply_fsdp:
         fsdp2_plugin = FullyShardedDataParallelPlugin(
             fsdp_version=2,
-            cpu_ram_efficient_loading=True,
+            cpu_ram_efficient_loading=False,
             auto_wrap_policy="transformer_based_wrap",
             transformer_cls_names_to_wrap=["LlamaDecoderLayer"],
             **plugin_kwargs,
